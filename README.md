@@ -28,18 +28,18 @@ Requires Unity 2022.3 or newer.
 3. Enter the URL below. The `#2.0.0` suffix pins the version. Leave it out to follow the latest commit.
 
 ```text
-https://github.com/MicoNoNico/HarmonyAudioManager.git#2.0.0
+https://github.com/Micolash54/HarmonyAudioManager.git#2.0.0
 ```
 
 You can also add the line to `Packages/manifest.json` directly:
 
 ```json
-"com.micolash.harmonyaudio": "https://github.com/MicoNoNico/HarmonyAudioManager.git#2.0.0"
+"com.micolash.harmonyaudio": "https://github.com/Micolash54/HarmonyAudioManager.git#2.0.0"
 ```
 
 ### Unity package
 
-1. Download the latest `.unitypackage` from [Releases](https://github.com/MicoNoNico/HarmonyAudioManager/releases).
+1. Download the latest `.unitypackage` from [Releases](https://github.com/Micolash54/HarmonyAudioManager/releases).
 2. In Unity, go to **Assets > Import Package > Custom Package...**.
 3. Select the package and import its files into `Assets/HarmonyAudio`.
 

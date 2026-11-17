@@ -12,15 +12,15 @@
     "sfx"
   ],
   "license": "MIT",
-  "documentationUrl": "https://github.com/MicoNoNico/HarmonyAudioManager#readme",
-  "changelogUrl": "https://github.com/MicoNoNico/HarmonyAudioManager/blob/main/CHANGELOG.md",
-  "licensesUrl": "https://github.com/MicoNoNico/HarmonyAudioManager/blob/main/LICENSE.md",
+  "documentationUrl": "https://github.com/Micolash54/HarmonyAudioManager#readme",
+  "changelogUrl": "https://github.com/Micolash54/HarmonyAudioManager/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/Micolash54/HarmonyAudioManager/blob/main/LICENSE.md",
   "dependencies": {
     "com.unity.modules.audio": "1.0.0"
   },
   "author": {
     "name": "Niccolò Chiodo",
     "email": "micononico@gmail.com",
-    "url": "https://github.com/MicoNoNico"
+    "url": "https://github.com/Micolash54"
   }
 }
