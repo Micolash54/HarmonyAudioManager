@@ -18,6 +18,9 @@ namespace HarmonyAudio.Scripts
     [CreateAssetMenu(fileName = "Audio Asset", menuName = "HarmonyAudio/New Audio Asset")]
     public class AudioAsset : ScriptableObject
     {
+        [SerializeField] private string assetId;
+        [SerializeField] private string channelId = AudioChannelIds.Sfx;
+
         public bool allowMultipleClips = false;
 
         [Tooltip("Single Audio Clip with Volume")]
@@ -33,6 +36,44 @@ namespace HarmonyAudio.Scripts
         public AudioRolloffMode rolloffMode = AudioRolloffMode.Logarithmic;
         public float minDistance = 1f;
         public float maxDistance = 100f;
+
+        public string AssetId => assetId;
+        public string ChannelId => channelId;
+
+        private void OnValidate()
+        {
+            assetId = AudioIdUtility.NormalizeStableId(assetId, AudioIdUtility.NormalizeStableId(name, "audio"));
+            channelId = AudioIdUtility.NormalizeStableId(channelId, AudioChannelIds.Sfx);
+        }
+
+        public bool EnsureStableId(string suggestedId)
+        {
+            if (!string.IsNullOrEmpty(assetId))
+                return false;
+
+            assetId = AudioIdUtility.NormalizeStableId(suggestedId, "audio");
+            return true;
+        }
+
+        public bool SetStableId(string value)
+        {
+            string normalized = AudioIdUtility.NormalizeStableId(value);
+            if (assetId == normalized)
+                return false;
+
+            assetId = normalized;
+            return true;
+        }
+
+        public bool SetChannelId(string value)
+        {
+            string normalized = AudioIdUtility.NormalizeStableId(value, AudioChannelIds.Sfx);
+            if (channelId == normalized)
+                return false;
+
+            channelId = normalized;
+            return true;
+        }
     }
     
     [Serializable]

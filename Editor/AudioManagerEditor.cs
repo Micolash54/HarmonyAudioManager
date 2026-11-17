@@ -7,175 +7,157 @@ namespace HarmonyAudio.Editor
     [CustomEditor(typeof(AudioManager))]
     public class AudioManagerEditor : UnityEditor.Editor
     {
-        private Texture2D _headerImage;
-        
-        private SerializedProperty _masterVolumeProp;
-        private SerializedProperty _musicVolumeProp;
-        private SerializedProperty _soundsVolumeProp;
-        private SerializedProperty _voiceVolumeProp;
-        private SerializedProperty _enableVoiceProp;
-        private SerializedProperty _initialVoicePoolSizeProp;
-        private SerializedProperty _maxVoicePoolSizeProp;
-        private SerializedProperty _enumGenerationPathProp;
+        // Banner.png is located by GUID so it resolves whether the package lives in Assets or in Packages.
+        private const string BannerGuid = "02f8f319adc5dfa4c951264cab0001ce";
 
-        // Variable for tracking the foldout state
-        private bool _volumeControlsFoldout = true;
-        private bool _extensionsFoldout = true;
+        private Texture2D _headerImage;
+        private bool _dashboardFoldout = true;
+        private bool _channelsFoldout = true;
 
         private void OnEnable()
         {
-            _headerImage = Resources.Load<Texture2D>("Banner");
-            
-            _masterVolumeProp = serializedObject.FindProperty("masterVolume");
-            _musicVolumeProp = serializedObject.FindProperty("musicVolume");
-            _soundsVolumeProp = serializedObject.FindProperty("soundsVolume");
-            _voiceVolumeProp = serializedObject.FindProperty("voiceVolume");
-            _enableVoiceProp = serializedObject.FindProperty("enableVoice");
-            _initialVoicePoolSizeProp = serializedObject.FindProperty("initialVoicePoolSize");
-            _maxVoicePoolSizeProp = serializedObject.FindProperty("maxVoicePoolSize");
-            _enumGenerationPathProp = serializedObject.FindProperty("libraryGenerationPath");
+            string bannerPath = AssetDatabase.GUIDToAssetPath(BannerGuid);
+            _headerImage = string.IsNullOrEmpty(bannerPath)
+                ? null
+                : AssetDatabase.LoadAssetAtPath<Texture2D>(bannerPath);
         }
 
         public override void OnInspectorGUI()
         {
-            // Custom box (temporarily disabled)
-            // GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
-            // boxStyle.normal.background = new Texture2D(2, 2);
-            // boxStyle.padding = new RectOffset(10, 10, 10, 10);  // Padding inside the box
-            
             serializedObject.Update();
-            
+
             if (_headerImage != null)
             {
-                float inspectorWidth = EditorGUIUtility.currentViewWidth - 30; // Get the current inspector width
-                
-                GUILayout.BeginHorizontal();
-                GUILayout.Label(_headerImage, GUILayout.Width(inspectorWidth), GUILayout.Height(inspectorWidth/3)); // Adjust the size as needed
-                GUILayout.EndHorizontal();
+                float inspectorWidth = EditorGUIUtility.currentViewWidth - 30f;
+                GUILayout.Label(_headerImage, GUILayout.Width(inspectorWidth), GUILayout.Height(inspectorWidth / 3f));
             }
-            DrawDefaultInspector();
-            
-            GUILayout.Space(20);
-            
-            // Enum Generation Path Input Field
-            EditorGUILayout.LabelField("Library Generation Settings", EditorStyles.boldLabel);
-            EditorGUILayout.BeginHorizontal();
-            
-            EditorGUILayout.PropertyField(_enumGenerationPathProp, new GUIContent("Library Path"));
-            
-            EditorGUILayout.EndHorizontal();
-            
-            // Path validation (optional)
-            if (!System.IO.Directory.Exists(_enumGenerationPathProp.stringValue))
-            {
-                EditorGUILayout.HelpBox("The specified path does not exist. A folder will be created at that location.", MessageType.Warning);
-            }
-            
-            EditorGUILayout.HelpBox("The path must be within the HarmonyAudio folder.", MessageType.Info);
 
-            EditorGUILayout.Space(20);
-
-            GUILayout.BeginVertical();
-            
-            GUILayout.BeginHorizontal();
-            GUILayout.Space(10); // Adds padding before the foldout
-            _volumeControlsFoldout = EditorGUILayout.Foldout(_volumeControlsFoldout, "Volume Controls", true);
-            GUILayout.EndHorizontal();
-
-            if (_volumeControlsFoldout)
-            {
-                EditorGUILayout.Space(10);
-                // Indent for better visual organization
-                EditorGUI.indentLevel++;
-
-                // Master Volume Slider (1 to 100 scale)
-                DrawVolumeSlider("Master Volume", _masterVolumeProp);
-
-                // Music Volume Slider (1 to 100 scale)
-                DrawVolumeSlider("Music Volume", _musicVolumeProp);
-
-                // Sounds Volume Slider (1 to 100 scale)
-                DrawVolumeSlider("Sounds Volume", _soundsVolumeProp);
-                
-                // If voice is enabled, draw the voice volume slider
-                if (_enableVoiceProp.boolValue)
-                {
-                    // Voice Volume Slider (1 to 100 scale)
-                    DrawVolumeSlider("Voice Volume", _voiceVolumeProp);
-                }
-
-                // Reset indent level
-                EditorGUI.indentLevel--;
-            }
-            
-            GUILayout.EndVertical();
-
-            EditorGUILayout.Space(20);
-            
-            _extensionsFoldout = EditorGUILayout.Foldout(_extensionsFoldout, "Extensions", true, EditorStyles.foldoutHeader);
-
-            if (_extensionsFoldout)
-            {
-                GUILayout.Space(10);
-                EditorGUI.indentLevel++;
-
-                EditorGUILayout.BeginVertical();
-                
-                EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField("Voice settings extension", GUILayout.Width(200));
-
-                string voiceButtonLabel = _enableVoiceProp.boolValue ? "Disable" : "Enable";
-                if (GUILayout.Button(voiceButtonLabel, GUILayout.Width(60)))
-                {
-                    _enableVoiceProp.boolValue = !_enableVoiceProp.boolValue;  // Toggle the enableVoice property
-                }
-                EditorGUILayout.EndHorizontal();
-                
-                GUILayout.Space(10);
-                
-                if (_enableVoiceProp.boolValue)
-                {
-                    EditorGUILayout.PropertyField(_initialVoicePoolSizeProp, new GUIContent("Initial Voice Pool Size"));
-                    EditorGUILayout.PropertyField(_maxVoicePoolSizeProp, new GUIContent("Max Voice Pool Size (0 = Unlimited)"));
-                }
-                
-                GUILayout.Space(10);
-                
-                // If voice extension is enabled, add a text box
-                if (_enableVoiceProp.boolValue)
-                {
-                    EditorGUILayout.HelpBox("Voice over extension enabled, make sure to add your new clips in your library!", MessageType.Info);
-                }
-                
-                // Reset indent level
-                EditorGUI.indentLevel--;
-                
-                // End the custom-colored section
-                EditorGUILayout.EndVertical();                
-            }
-            
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("audioLibrary"));
             serializedObject.ApplyModifiedProperties();
+
+            var manager = (AudioManager)target;
+            if (manager.Catalog == null)
+            {
+                EditorGUILayout.HelpBox(
+                    "Assign an Audio Library. Channels, assets, and enum generation settings live in that catalog.",
+                    MessageType.Info);
+                return;
+            }
+
+            EditorGUILayout.Space();
+            EditorGUILayout.HelpBox(
+                "Channel definitions are stored in the assigned Audio Library. Select the library to edit built-ins or add custom channels.",
+                MessageType.Info);
+
+            DrawDashboard(manager);
+
+            if (!manager.HasPendingLegacySettings)
+                return;
+
+            EditorGUILayout.Space();
+            EditorGUILayout.HelpBox(
+                "This component was created with Harmony 1.x. Importing copies its old volume and pool settings " +
+                "into the Audio Library and overwrites the Master, Music, SFX, and Voice channel defaults there.",
+                MessageType.Warning);
+            if (GUILayout.Button("Upgrade Legacy Manager Settings"))
+            {
+                Undo.RecordObject(manager, "Upgrade HarmonyAudio Manager Settings");
+                Undo.RecordObject(manager.Catalog, "Upgrade HarmonyAudio Library");
+                if (manager.UpgradeLegacyConfiguration())
+                {
+                    EditorUtility.SetDirty(manager);
+                    EditorUtility.SetDirty(manager.Catalog);
+                    foreach (AudioAsset asset in manager.Catalog.Assets)
+                    {
+                        if (asset != null)
+                            EditorUtility.SetDirty(asset);
+                    }
+                    AssetDatabase.SaveAssets();
+                }
+            }
         }
 
-        /// <summary>
-        /// Draws a slider for the volume with values from 1 to 100, while internally converting to a 0-1 range.
-        /// Ensures that the value is rounded to an integer.
-        /// </summary>
-        /// <param name="label">Label for the slider.</param>
-        /// <param name="volumeProperty">Serialized property representing the volume value.</param>
-        private void DrawVolumeSlider(string label, SerializedProperty volumeProperty)
+        private void DrawDashboard(AudioManager manager)
         {
-            EditorGUILayout.BeginHorizontal();
+            AudioLibrary catalog = manager.Catalog;
+            EditorGUILayout.Space();
+            _dashboardFoldout = EditorGUILayout.Foldout(_dashboardFoldout, "Catalog Dashboard", true);
+            if (!_dashboardFoldout)
+                return;
 
-            // Label
-            EditorGUILayout.LabelField(label, GUILayout.Width(150));
+            EditorGUI.indentLevel++;
+            DrawReadOnlyLabel("Library", catalog.name);
+            DrawReadOnlyLabel("Channels", catalog.Channels.Count.ToString());
+            DrawReadOnlyLabel("Unified Assets", catalog.Assets.Count.ToString());
+            DrawReadOnlyLabel("Legacy Library Upgrade", catalog.HasPendingLegacyUpgrade ? "Pending" : "Complete");
+            DrawReadOnlyLabel(
+                "Legacy Manager Settings",
+                manager.HasPendingLegacySettings ? "Not imported" : "Nothing to import");
 
-            // Slider with values from 1 to 100, but internally stored as 0.0 to 1.0
-            float volumePercentage = volumeProperty.floatValue * 100f; // Convert from 0-1 to 0-100 for display
-            volumePercentage = Mathf.Round(EditorGUILayout.Slider(volumePercentage, 0f, 100f)); // Round to nearest integer
-            volumeProperty.floatValue = volumePercentage / 100f; // Convert back from 0-100 to 0-1 for internal use
+            SerializedProperty legacyMusicSource = serializedObject.FindProperty("musicSource");
+            string legacySourceStatus = legacyMusicSource.objectReferenceValue != null
+                ? "Attached (optional compatibility fallback)"
+                : "Not attached (runtime source will be created)";
+            DrawReadOnlyLabel("Legacy Music Source", legacySourceStatus);
 
-            EditorGUILayout.EndHorizontal();
+            _channelsFoldout = EditorGUILayout.Foldout(_channelsFoldout, "Configured Channels", true);
+            if (_channelsFoldout)
+            {
+                EditorGUI.indentLevel++;
+                foreach (AudioChannelDefinition channel in catalog.Channels)
+                {
+                    if (channel != null)
+                        DrawChannelSummary(catalog, channel);
+                }
+                EditorGUI.indentLevel--;
+            }
+
+            var validationMessages = catalog.GetValidationMessages();
+            if (validationMessages.Count == 0)
+            {
+                EditorGUILayout.HelpBox("Catalog validation passed.", MessageType.Info);
+            }
+            else
+            {
+                foreach (string message in validationMessages)
+                    EditorGUILayout.HelpBox(message, MessageType.Warning);
+            }
+
+            EditorGUI.indentLevel--;
+        }
+
+        private static void DrawChannelSummary(AudioLibrary catalog, AudioChannelDefinition channel)
+        {
+            int assignedAssets = 0;
+            foreach (AudioAsset asset in catalog.Assets)
+            {
+                if (asset != null && asset.ChannelId == channel.Id)
+                    assignedAssets++;
+            }
+
+            string behavior = channel.IsMaster
+                ? "Global mix bus"
+                : channel.PlaybackMode.ToString();
+            string persistence = channel.PersistSettings ? "persistent" : "session only";
+            string summary =
+                $"{channel.DisplayName} ({channel.Id}): {behavior}, " +
+                $"volume {channel.DefaultVolume:0.##}, {persistence}, {assignedAssets} assets";
+
+            if (!channel.IsMaster && channel.PlaybackMode == AudioChannelPlaybackMode.Pooled)
+                summary += $", pool {channel.InitialPoolSize}/{FormatMaxPoolSize(channel.MaxPoolSize)}";
+
+            EditorGUILayout.LabelField(summary, EditorStyles.wordWrappedLabel);
+        }
+
+        private static string FormatMaxPoolSize(int maxPoolSize)
+        {
+            return maxPoolSize == 0 ? "unlimited" : maxPoolSize.ToString();
+        }
+
+        private static void DrawReadOnlyLabel(string label, string value)
+        {
+            using (new EditorGUI.DisabledScope(true))
+                EditorGUILayout.TextField(label, value);
         }
     }
 }

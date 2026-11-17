@@ -1,1196 +1,813 @@
 /*
  * Harmony - Simple Audio Manager
- * Author: Niccolò Chiodo
- * Copyright © 2024 Niccolò Chiodo
- * 
+ * Author: Niccolo Chiodo
+ * Copyright 2024 Niccolo Chiodo
+ *
  * View License in HarmonyAudio/LICENSE.md
- * 
- * Description:
- * Manages audio playback for music and sound effects, including volume control,
- * fading, and cross-fading between tracks.
  */
 
+using System;
 using System.Collections;
 using System.Collections.Generic;
-using HarmonyAudio.Scripts.Library;
 using UnityEngine;
 
 namespace HarmonyAudio.Scripts
 {
+    public struct PlaybackOptions
+    {
+        public bool Loop;
+        public bool RandomClip;
+        public bool StartMuted;
+        public Transform ParentTransform;
+
+        public PlaybackOptions(
+            bool loop = false,
+            bool randomClip = false,
+            Transform parentTransform = null,
+            bool startMuted = false)
+        {
+            Loop = loop;
+            RandomClip = randomClip;
+            ParentTransform = parentTransform;
+            StartMuted = startMuted;
+        }
+    }
+
     public class AudioManager : MonoBehaviour
     {
-        #region Singleton
-
-        private static AudioManager _instance;
-
-        protected void Awake()
-        {
-            if (_instance == null)
-            {
-                _instance = this;
-                DontDestroyOnLoad(gameObject); // Make the AudioManager persist across scenes
-                Initialize();
-            }
-            else
-            {
-                Destroy(gameObject); // Destroy this instance if another instance already exists
-            }
-        }
-
-        #endregion
-
-        #region Fields and Properties
-
         [Header("References")]
         [SerializeField] private AudioLibrary audioLibrary;
-        [SerializeField] private AudioSource musicSource;
 
-        [Header("Pooling Settings")]
-        [SerializeField] private int initialSoundPoolSize = 5;
-        [SerializeField] private int maxSoundPoolSize = 10; // Set to 0 for unlimited
+        // Settings from 1.x scene components. They are only read by UpgradeLegacyConfiguration,
+        // which copies them into the AudioLibrary once.
+        [SerializeField, HideInInspector] private AudioSource musicSource;
+        [SerializeField, HideInInspector] private int initialSoundPoolSize = 5;
+        [SerializeField, HideInInspector] private int maxSoundPoolSize = 10;
         [SerializeField, HideInInspector] private int initialVoicePoolSize = 3;
-        [SerializeField, HideInInspector] private int maxVoicePoolSize = 10; // Set to 0 for unlimited
-        
-        [SerializeField, HideInInspector] private string libraryGenerationPath = "Assets/HarmonyAudio/Scripts/Library";
-        public string EnumGenerationPath
-        {
-            get => libraryGenerationPath;
-            set => libraryGenerationPath = value;
-        }
-        
+        [SerializeField, HideInInspector] private int maxVoicePoolSize = 10;
         [SerializeField, HideInInspector] private float masterVolume = 1f;
         [SerializeField, HideInInspector] private float musicVolume = 1f;
         [SerializeField, HideInInspector] private float soundsVolume = 1f;
         [SerializeField, HideInInspector] private float voiceVolume = 1f;
-        
         [SerializeField, HideInInspector] public bool enableVoice;
-        
-        private List<AudioSource> _soundSources;
-        private List<AudioSource> _voiceSources;
-        
-        private Dictionary<string, AudioClip> _musicClipsDict;
-        private Dictionary<string, AudioClip> _sfxClipsDict;
-        
-        private GameObject _soundSourcesParent;
-        private GameObject _voiceSourcesParent;
+        [SerializeField, HideInInspector] private bool legacyManagerSettingsMigrated;
 
-        #endregion
+        private static AudioManager _instance;
+        private readonly Dictionary<string, AudioChannelRuntime> _channels =
+            new Dictionary<string, AudioChannelRuntime>(StringComparer.OrdinalIgnoreCase);
 
-        #region Initialization
+        public AudioLibrary Catalog => audioLibrary;
+
+        /// <summary>
+        /// True while this component still carries 1.x settings that have not been copied into the library.
+        /// </summary>
+        public bool HasPendingLegacySettings => !legacyManagerSettingsMigrated;
+
+        // Called by the editor when the component is first added. A new component has no 1.x settings to import.
+        private void Reset()
+        {
+            legacyManagerSettingsMigrated = true;
+        }
+
+        protected void Awake()
+        {
+            if (_instance != null && _instance != this)
+            {
+                Destroy(gameObject);
+                return;
+            }
+
+            _instance = this;
+            DontDestroyOnLoad(gameObject);
+            Initialize();
+        }
+
+        private void OnDestroy()
+        {
+            if (_instance == this)
+                _instance = null;
+        }
+
+        public bool UpgradeLegacyConfiguration()
+        {
+            if (audioLibrary == null || legacyManagerSettingsMigrated)
+                return false;
+
+            audioLibrary.UpgradeLegacyData();
+            audioLibrary.ApplyLegacyManagerDefaults(
+                masterVolume,
+                musicVolume,
+                soundsVolume,
+                initialSoundPoolSize,
+                maxSoundPoolSize,
+                enableVoice,
+                voiceVolume,
+                initialVoicePoolSize,
+                maxVoicePoolSize);
+            legacyManagerSettingsMigrated = true;
+            return true;
+        }
 
         private void Initialize()
         {
-            LoadVolumeSettings();
-            
-            // Create parent GameObjects
-            _soundSourcesParent = new GameObject("SoundSources");
-            _soundSourcesParent.transform.parent = this.transform;
-
-            _voiceSourcesParent = new GameObject("VoiceSources");
-            _voiceSourcesParent.transform.parent = this.transform;
-
-            // Initialize the SFX AudioSource pool
-            _soundSources = new List<AudioSource>();
-            for (int i = 0; i < initialSoundPoolSize; i++)
+            if (audioLibrary == null)
             {
-                CreateNewSoundSource(true);
+                Debug.LogError("AudioManager requires an AudioLibrary.");
+                return;
             }
 
-            // Initialize the Voice AudioSource pool if voice is enabled
-            if (enableVoice)
+            audioLibrary.UpgradeLegacyData();
+            BuildChannelRuntimes();
+            LoadVolumeSettingsInternal();
+            InitializeRuntimeSources();
+            UpdateAllSourceVolumes();
+
+            foreach (string message in audioLibrary.GetValidationMessages())
+                Debug.LogWarning($"HarmonyAudio validation: {message}", audioLibrary);
+        }
+
+        private void BuildChannelRuntimes()
+        {
+            _channels.Clear();
+            foreach (AudioChannelDefinition definition in audioLibrary.Channels)
             {
-                _voiceSources = new List<AudioSource>();
-                for (int i = 0; i < initialVoicePoolSize; i++)
+                if (definition == null || string.IsNullOrEmpty(definition.Id))
+                    continue;
+
+                if (_channels.ContainsKey(definition.Id))
                 {
-                    CreateNewVoiceSource(true);
+                    Debug.LogWarning($"Duplicate audio channel ID '{definition.Id}' was ignored.", audioLibrary);
+                    continue;
                 }
-            }
-        }
 
-
-        #endregion
-
-        #region Music Playback Methods
-
-        /// <summary>
-        /// Plays a music clip by name.
-        /// </summary>
-        /// <param name="musicClip">The name of the music clip to play.</param>
-        /// <param name="loop">Whether the music should loop.</param>
-        /// <param name="parentTransform">Optional parent transform for spatial audio.</param>
-        public static void PlayMusic(MusicClips musicClip, bool loop = true, Transform parentTransform = null)
-        {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found. Ensure an AudioManager exists in the scene.");
-                return;
-            }
-
-            AudioAsset asset = _instance.audioLibrary.GetMusicAsset(musicClip);
-            if (asset != null)
-            {
-                AudioClipWithVolume clip = GetClipFromAsset(asset);
-
-                if (clip != null)
+                var runtime = new AudioChannelRuntime(definition);
+                if (!definition.IsMaster)
                 {
-                    if (parentTransform != null)
-                    {
-                        // Create and parent a spatial AudioSource
-                        AudioSource newSource = _instance.CreateNewSpatialSoundSource(parentTransform, asset);
-                        newSource.clip = clip.Clip;
-                        newSource.loop = loop;
-                        newSource.volume = _instance.musicVolume * _instance.masterVolume * clip.Volume;
-                        newSource.Play();
-
-                        // Replace the current music source reference if desired
-                        _instance.musicSource = newSource;
-                    }
-                    else
-                    {
-                        // Use the default music source for non-spatial audio
-                        _instance.musicSource.clip = clip.Clip;
-                        _instance.musicSource.loop = loop;
-                        _instance.musicSource.volume = _instance.musicVolume * _instance.masterVolume * clip.Volume;
-                        _instance.musicSource.Play();
-                    }
+                    runtime.Root = new GameObject($"{definition.DisplayName} Sources");
+                    runtime.Root.transform.SetParent(transform);
                 }
-                else
+
+                _channels.Add(definition.Id, runtime);
+            }
+        }
+
+        private void InitializeRuntimeSources()
+        {
+            foreach (AudioChannelRuntime runtime in _channels.Values)
+            {
+                if (runtime.Definition.IsMaster)
+                    continue;
+
+                if (runtime.Definition.PlaybackMode == AudioChannelPlaybackMode.SingleSource)
                 {
-                    Debug.LogWarning($"No clip found in AudioAsset '{musicClip}'.");
+                    GetOrCreateSingleSource(runtime);
+                    continue;
                 }
-            }
-            else
-            {
-                Debug.LogWarning($"Music asset '{musicClip}' not found.");
+
+                for (int index = 0; index < runtime.Definition.InitialPoolSize; index++)
+                    CreateRuntimeSource(runtime, true);
             }
         }
 
-        /// <summary>
-        /// Plays a random music clip from an array.
-        /// </summary>
-        /// <param name="musicClip">The array of music clips to choose from.</param>
-        /// <param name="loop">Whether the music should loop.</param>
-        /// <param name="parentTransform">Optional parent transform for spatial audio.</param>
-        public static void PlayRandomMusic(MusicClips musicClip, bool loop = true, Transform parentTransform = null)
+        public static AudioSource Play(AudioAsset asset, PlaybackOptions options = default(PlaybackOptions))
         {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
+            if (!TryGetInstance(out AudioManager manager))
+                return null;
+
+            return manager.PlayInternal(asset, options);
+        }
+
+        public static AudioSource Play(string assetId, PlaybackOptions options = default(PlaybackOptions))
+        {
+            if (!TryGetInstance(out AudioManager manager))
+                return null;
+
+            AudioAsset asset = manager.audioLibrary != null ? manager.audioLibrary.GetAsset(assetId) : null;
+            return manager.PlayInternal(asset, options);
+        }
+
+        /// <summary>
+        /// Plays the asset that matches a member of the generated <c>AudioClips</c> enum.
+        /// The enum is generated into the consuming project, so any enum type is accepted
+        /// and resolved by member name.
+        /// </summary>
+        public static AudioSource Play<TEnum>(TEnum clip, PlaybackOptions options = default(PlaybackOptions))
+            where TEnum : struct, Enum
+        {
+            if (!TryGetInstance(out AudioManager manager))
+                return null;
+
+            return manager.PlayInternal(manager.audioLibrary.GetAsset(clip), options);
+        }
+
+        public static void StopChannel(string channelId)
+        {
+            if (TryGetInstance(out AudioManager manager))
+                manager.StopChannelInternal(channelId);
+        }
+
+        public static void PauseChannel(string channelId)
+        {
+            if (TryGetInstance(out AudioManager manager))
+                manager.ForEachChannelSource(channelId, source => source.Pause());
+        }
+
+        public static void ResumeChannel(string channelId)
+        {
+            if (TryGetInstance(out AudioManager manager))
+                manager.ForEachChannelSource(channelId, source => source.UnPause());
+        }
+
+        public static void SetChannelVolume(string channelId, float volume)
+        {
+            if (!TryGetInstance(out AudioManager manager))
                 return;
-            }
 
-            AudioAsset asset = _instance.audioLibrary.GetMusicAsset(musicClip);
-            if (asset != null)
-            {
-                AudioClipWithVolume randomClip = GetRandomClipFromAsset(asset);
-
-                if (randomClip != null)
-                {
-                    if (parentTransform != null)
-                    {
-                        // Create and parent a spatial AudioSource
-                        AudioSource newSource = _instance.CreateNewSpatialSoundSource(parentTransform, asset);
-                        newSource.clip = randomClip.Clip;
-                        newSource.loop = loop;
-                        newSource.volume = _instance.musicVolume * _instance.masterVolume * randomClip.Volume;
-                        newSource.Play();
-
-                        // Replace the current music source reference if desired
-                        _instance.musicSource = newSource;
-                    }
-                    else
-                    {
-                        // Use the default music source for non-spatial audio
-                        _instance.musicSource.clip = randomClip.Clip;
-                        _instance.musicSource.loop = loop;
-                        _instance.musicSource.volume = _instance.musicVolume * _instance.masterVolume * randomClip.Volume;
-                        _instance.musicSource.Play();
-                    }
-                }
-                else
-                {
-                    Debug.LogWarning($"No clip found in AudioAsset '{musicClip}' to play.");
-                }
-            }
-            else
-            {
-                Debug.LogWarning($"Music asset '{musicClip}' not found.");
-            }
-        }
-
-        /// <summary>
-        /// Stops the currently playing music.
-        /// </summary>
-        public static void StopMusic()
-        {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
+            if (!manager.TryGetRuntime(channelId, out AudioChannelRuntime runtime))
                 return;
-            }
 
-            _instance.musicSource.Stop();
-            // Reset the volume (for fade coroutine)
-            _instance.musicSource.volume = _instance.musicVolume;
+            runtime.Volume = Mathf.Clamp01(volume);
+            manager.UpdateRuntimeSourceVolumes(runtime);
         }
 
-        /// <summary>
-        /// Pauses the currently playing music.
-        /// </summary>
-        public static void PauseMusic()
+        public static float GetChannelVolume(string channelId)
         {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
-                return;
-            }
-
-            _instance.musicSource.Pause();
-        }
-        
-        /// <summary>
-        /// Resumes the paused music.
-        /// </summary>
-        public static void ResumeMusic()
-        {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
-                return;
-            }
-
-            _instance.musicSource.UnPause();
-        }
-
-        /// <summary>
-        /// Fades the music volume to a target volume over a duration.
-        /// </summary>
-        /// <param name="targetVolume">The target volume (0.0 to 1.0).</param>
-        /// <param name="duration">The duration over which to fade.</param>
-        public static void FadeMusicVolume(float targetVolume, float duration)
-        {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
-                return;
-            }
-
-            _instance.StartCoroutine(_instance.FadeMusicVolumeCoroutine(targetVolume, duration));
-        }
-        
-        /// <summary>
-        /// Gets the current music volume.
-        /// </summary>
-        /// <returns>The music volume (0.0 to 1.0).</returns>
-        public static float GetMusicVolume()
-        {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
+            if (!TryGetInstance(out AudioManager manager))
                 return 0f;
-            }
 
-            return _instance.musicVolume;
+            return manager.TryGetRuntime(channelId, out AudioChannelRuntime runtime) ? runtime.Volume : 0f;
         }
 
-        #endregion
-
-        #region Sound Effect Playback Methods
-
-        /// <summary>
-        /// Plays a sound effect by name.
-        /// </summary>
-        /// <param name="soundClip">The name of the sound effect clip to play.</param>
-        /// <param name="parentTransform">Optional parent transform for spatial audio.</param>
-        public static void PlaySound(SoundClips soundClip, Transform parentTransform = null)
+        public static void SetChannelEnabled(string channelId, bool enabled)
         {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
+            if (!TryGetInstance(out AudioManager manager))
                 return;
-            }
 
-            AudioAsset asset = _instance.audioLibrary.GetSoundAsset(soundClip);
-            if (asset != null)
-            {
-                AudioClipWithVolume clipWithVolume = GetClipFromAsset(asset);
-
-                if (clipWithVolume != null && clipWithVolume.Clip != null)
-                {
-                    if (parentTransform != null)
-                    {
-                        // Spatial sound: create a new AudioSource and parent it
-                        AudioSource newSource = _instance.CreateNewSpatialSoundSource(parentTransform, asset);
-                        newSource.volume = _instance.soundsVolume * _instance.masterVolume * clipWithVolume.Volume;
-                        newSource.clip = clipWithVolume.Clip;
-                        newSource.Play();
-
-                        // Start cleanup coroutine
-                        _instance.StartCoroutine(_instance.CleanupSpatialSoundSourceAfterPlay(newSource));
-                    }
-                    else
-                    {
-                        // Non-spatial sound: use pooled AudioSources
-                        AudioSource availableSource = _instance._soundSources.Find(s => !s.isPlaying);
-                        if (availableSource != null)
-                        {
-                            availableSource.volume = _instance.soundsVolume * _instance.masterVolume * clipWithVolume.Volume;
-                            availableSource.PlayOneShot(clipWithVolume.Clip);
-                        }
-                        else
-                        {
-                            if (_instance.maxSoundPoolSize == 0 ||
-                                _instance._soundSources.Count < _instance.maxSoundPoolSize)
-                            {
-                                AudioSource newSource = _instance.CreateNewSoundSource(); // Dynamic source
-                                newSource.volume = _instance.soundsVolume * _instance.masterVolume * clipWithVolume.Volume;
-                                newSource.PlayOneShot(clipWithVolume.Clip);
-
-                                // Start cleanup coroutine
-                                _instance.StartCoroutine(_instance.CleanupSoundSourceAfterPlay(newSource, clipWithVolume.Clip));
-                            }
-                            else
-                            {
-                                Debug.LogWarning("All Sound AudioSources are busy, and max pool size reached.");
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    Debug.LogWarning($"No clip found for '{soundClip}'.");
-                }
-            }
-            else
-            {
-                Debug.LogWarning($"Sound asset '{soundClip}' not found.");
-            }
-        }
-        
-        /// <summary>
-        /// Plays a random sound effect from an AudioAsset.
-        /// </summary>
-        /// <param name="soundClip">The name of the sound effect clip to play.</param>
-        /// <param name="parentTransform">Optional parent transform for spatial audio.</param>
-        public static void PlayRandomSound(SoundClips soundClip, Transform parentTransform = null)
-        {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
+            if (!manager.TryGetRuntime(channelId, out AudioChannelRuntime runtime))
                 return;
-            }
 
-            AudioAsset asset = _instance.audioLibrary.GetSoundAsset(soundClip);
-            if (asset != null)
-            {
-                AudioClipWithVolume clipWithVolume = GetRandomClipFromAsset(asset);
+            runtime.Enabled = enabled;
+            if (!enabled)
+                manager.StopChannelInternal(channelId);
 
-                if (clipWithVolume != null && clipWithVolume.Clip != null)
-                {
-                    if (parentTransform != null)
-                    {
-                        // Spatial sound: create a new AudioSource and parent it
-                        AudioSource newSource = _instance.CreateNewSpatialSoundSource(parentTransform, asset);
-                        newSource.volume = _instance.soundsVolume * _instance.masterVolume * clipWithVolume.Volume;
-                        newSource.clip = clipWithVolume.Clip;
-                        newSource.Play();
-
-                        // Start cleanup coroutine
-                        _instance.StartCoroutine(_instance.CleanupSpatialSoundSourceAfterPlay(newSource));
-                    }
-                    else
-                    {
-                        // Non-spatial sound: use pooled AudioSources
-                        AudioSource availableSource = _instance._soundSources.Find(s => !s.isPlaying);
-                        if (availableSource != null)
-                        {
-                            availableSource.volume = _instance.soundsVolume * _instance.masterVolume * clipWithVolume.Volume;
-                            availableSource.PlayOneShot(clipWithVolume.Clip);
-                        }
-                        else
-                        {
-                            if (_instance.maxSoundPoolSize == 0 || 
-                                _instance._soundSources.Count < _instance.maxSoundPoolSize)
-                            {
-                                AudioSource newSource = _instance.CreateNewSoundSource(); // Dynamic source
-                                newSource.volume = _instance.soundsVolume * _instance.masterVolume * clipWithVolume.Volume;
-                                newSource.PlayOneShot(clipWithVolume.Clip);
-
-                                // Start cleanup coroutine
-                                _instance.StartCoroutine(_instance.CleanupSoundSourceAfterPlay(newSource, clipWithVolume.Clip));
-                            }
-                            else
-                            {
-                                Debug.LogWarning("All Sound AudioSources are busy, and max pool size reached.");
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    Debug.LogWarning($"No clip found for '{soundClip}' or the asset contains no clips.");
-                }
-            }
-            else
-            {
-                Debug.LogWarning($"Sound asset '{soundClip}' not found.");
-            }
+            manager.UpdateRuntimeSourceVolumes(runtime);
         }
-        
-        /// <summary>
-        /// Gets the current sound effects volume.
-        /// </summary>
-        /// <returns>The SFX volume (0.0 to 1.0).</returns>
-        public static float GetSoundVolume()
+
+        public static bool GetChannelEnabled(string channelId)
         {
-            if (_instance == null)
+            if (!TryGetInstance(out AudioManager manager))
+                return false;
+
+            return manager.TryGetRuntime(channelId, out AudioChannelRuntime runtime) && runtime.Enabled;
+        }
+
+        public static AudioSource GetActiveChannelSource(string channelId)
+        {
+            if (!TryGetInstance(out AudioManager manager))
+                return null;
+
+            if (!manager.TryGetRuntime(channelId, out AudioChannelRuntime runtime))
+                return null;
+
+            foreach (AudioSource source in runtime.Sources)
             {
-                Debug.LogError("AudioManager instance not found.");
-                return 0f;
+                if (source != null && source.isPlaying)
+                    return source;
             }
 
-            return _instance.soundsVolume;
+            return null;
         }
-        
-        #endregion
 
-        #region Volume Control Methods
-
-        /// <summary>
-        /// Sets the music volume.
-        /// </summary>
-        /// <param name="volume">The new volume level (0.0 to 1.0).</param>
-        public static void SetMusicVolume(float volume)
+        public static void FadeChannelVolume(string channelId, float targetGain, float duration)
         {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
+            if (!TryGetInstance(out AudioManager manager))
                 return;
-            }
 
-            _instance.musicVolume = Mathf.Clamp01(volume);
-            _instance.musicSource.volume = _instance.musicVolume * _instance.masterVolume;
-        }
-
-        /// <summary>
-        /// Sets the sound effects volume.
-        /// </summary>
-        /// <param name="volume">The new volume level (0.0 to 1.0).</param>
-        public static void SetSoundVolume(float volume)
-        {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
+            if (!manager.TryGetRuntime(channelId, out AudioChannelRuntime runtime))
                 return;
-            }
 
-            _instance.soundsVolume = Mathf.Clamp01(volume);
-            // Update all SFX sources volumes
-            if (_instance._soundSources != null)
-            {
-                foreach (var source in _instance._soundSources)
-                {
-                    source.volume = _instance.soundsVolume * _instance.masterVolume;
-                }
-            }
-        }
-        
-        /// <summary>
-        /// Sets the master volume.
-        /// </summary>
-        /// <param name="volume">The new master volume level (0.0 to 1.0).</param>
-        public static void SetMasterVolume(float volume)
-        {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
-                return;
-            }
+            if (runtime.FadeCoroutine != null)
+                manager.StopCoroutine(runtime.FadeCoroutine);
 
-            _instance.masterVolume = Mathf.Clamp01(volume);
-            _instance.UpdateAudioSourceVolumes();
+            runtime.FadeCoroutine = manager.StartCoroutine(
+                manager.FadeChannelGainCoroutine(runtime, Mathf.Clamp01(targetGain), duration));
         }
 
-        /// <summary>
-        /// Gets the current master volume.
-        /// </summary>
-        /// <returns>The master volume (0.0 to 1.0).</returns>
-        public static float GetMasterVolume()
-        {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
-                return 0f;
-            }
-
-            return _instance.masterVolume;
-        }
-        
-        /// <summary>
-        /// Updates the volume of all AudioSources based on individual and master volumes.
-        /// </summary>
-        private void UpdateAudioSourceVolumes()
-        {
-            // Update music source volume
-            musicSource.volume = musicVolume * masterVolume;
-
-            // Update all SFX sources volumes
-            if (_soundSources != null)
-            {
-                foreach (var source in _soundSources)
-                {
-                    source.volume = soundsVolume * masterVolume;
-                }
-            }
-            
-            // Update voice sources volume if enabled
-            if (enableVoice && _voiceSources != null)
-            {
-                foreach (var source in _voiceSources)
-                {
-                    source.volume = voiceVolume * masterVolume;
-                }
-            }
-        }
-
-        #endregion
-
-        #region Coroutines
-
-        /// <summary>
-        /// Coroutine to fade the music volume to a target volume over a duration.
-        /// </summary>
-        /// <param name="targetVolume">The target volume.</param>
-        /// <param name="duration">The duration over which to fade.</param>
-        private IEnumerator FadeMusicVolumeCoroutine(float targetVolume, float duration)
-        {
-            float startVolume = musicVolume;
-            float timer = 0f;
-
-            while (timer < duration)
-            {
-                timer += Time.deltaTime;
-                musicVolume = Mathf.Lerp(startVolume, targetVolume, timer / duration);
-                musicSource.volume = musicVolume * masterVolume;
-                yield return null;
-            }
-
-            musicVolume = targetVolume;
-            musicSource.volume = musicVolume * masterVolume;
-        }
-        
-        /// <summary>
-        /// Coroutine to fade the volume of all voice audio sources to a target volume over a duration.
-        /// </summary>
-        /// <param name="targetVolume">The target volume.</param>
-        /// <param name="duration">The duration over which to fade.</param>
-        private IEnumerator FadeVoiceVolumeCoroutine(float targetVolume, float duration)
-        {
-            float startVolume = voiceVolume;
-            float timer = 0f;
-
-            while (timer < duration)
-            {
-                timer += Time.deltaTime;
-                voiceVolume = Mathf.Lerp(startVolume, targetVolume, timer / duration);
-        
-                // Update volume for all active voice sources
-                foreach (var source in _voiceSources)
-                {
-                    if (source.isPlaying)
-                    {
-                        source.volume = voiceVolume * masterVolume;
-                    }
-                }
-
-                yield return null;
-            }
-
-            // Set the final volume
-            voiceVolume = targetVolume;
-            foreach (var source in _voiceSources)
-            {
-                if (source.isPlaying)
-                {
-                    source.volume = voiceVolume * masterVolume;
-                }
-            }
-        }
-        
-        /// <summary>
-        /// Coroutine to clean up a sound source after it has finished playing.
-        /// </summary>
-        /// <param name="source"></param>
-        /// <param name="clip"></param>
-        /// <returns></returns>
-        private IEnumerator CleanupSoundSourceAfterPlay(AudioSource source, AudioClip clip)
-        {
-            // Wait for the clip to finish playing
-            yield return new WaitForSeconds(clip.length + 0.1f);
-
-            // Ensure the source has stopped playing
-            while (source.isPlaying)
-            {
-                yield return null;
-            }
-
-            // Check if the source is dynamic (not initial)
-            AudioSourceMetadata metadata = source.GetComponent<AudioSourceMetadata>();
-            if (metadata != null && !metadata.isInitial)
-            {
-                // Remove from the pool
-                _soundSources.Remove(source);
-
-                // Destroy the GameObject
-                Destroy(source.gameObject);
-            }
-        }
-
-        /// <summary>
-        /// Coroutine to clean up a voice source after it has finished playing.
-        /// </summary>
-        /// <param name="source"></param>
-        /// <param name="clip"></param>
-        /// <returns></returns>
-        private IEnumerator CleanupVoiceSourceAfterPlay(AudioSource source, AudioClip clip)
-        {
-            // Wait for the clip to finish playing
-            yield return new WaitForSeconds(clip.length + 0.1f);
-
-            // Ensure the source has stopped playing
-            while (source.isPlaying)
-            {
-                yield return null;
-            }
-
-            // Check if the source is dynamic (not initial)
-            AudioSourceMetadata metadata = source.GetComponent<AudioSourceMetadata>();
-            if (metadata != null && !metadata.isInitial)
-            {
-                // Remove from the pool
-                _voiceSources.Remove(source);
-
-                // Destroy the GameObject
-                Destroy(source.gameObject);
-            }
-        }
-
-        #endregion
-
-        #region Save and Load (PlayerPrefs)
-
-        /// <summary>
-        /// Saves the current volume settings to PlayerPrefs.
-        /// </summary>
         public static void SaveVolumeSettings()
         {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
-                return;
-            }
-
-            PlayerPrefs.SetFloat("MasterVolume", _instance.masterVolume);
-            PlayerPrefs.SetFloat("MusicVolume", _instance.musicVolume);
-            PlayerPrefs.SetFloat("SoundsVolume", _instance.soundsVolume);
-            if (_instance.enableVoice) PlayerPrefs.SetFloat("VoiceVolume", _instance.voiceVolume);
-            PlayerPrefs.Save();
+            if (TryGetInstance(out AudioManager manager))
+                manager.SaveVolumeSettingsInternal();
         }
 
         public static void LoadVolumeSettings()
         {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
+            if (!TryGetInstance(out AudioManager manager))
                 return;
-            }
 
-            _instance.masterVolume = PlayerPrefs.GetFloat("MasterVolume", 1f);
-            _instance.musicVolume = PlayerPrefs.GetFloat("MusicVolume", 1f);
-            _instance.soundsVolume = PlayerPrefs.GetFloat("SoundsVolume", 1f);
-            if (_instance.enableVoice) _instance.voiceVolume = PlayerPrefs.GetFloat("VoiceVolume", 1f);
-
-            _instance.UpdateAudioSourceVolumes();
+            manager.LoadVolumeSettingsInternal();
+            manager.UpdateAllSourceVolumes();
         }
 
-        #endregion
-        
-        #region Voice Playback Extension
-
-        /// <summary>
-        /// Plays a voice clip by name.
-        /// </summary>
-        /// <param name="voiceClip">The name of the voice clip to play.</param>
-        /// <param name="loop">Whether the voice clip should loop.</param>
-        /// <param name="parentTransform">Optional parent transform for spatial audio.</param>
-        public static void PlayVoice(VoiceClips voiceClip, bool loop = false, Transform parentTransform = null)
+        public static void SetMasterVolume(float volume)
         {
-            if (_instance == null)
+            SetChannelVolume(AudioChannelIds.Master, volume);
+        }
+
+        public static float GetMasterVolume()
+        {
+            return GetChannelVolume(AudioChannelIds.Master);
+        }
+
+        private AudioSource PlayInternal(AudioAsset asset, PlaybackOptions options)
+        {
+            if (asset == null)
+                return null;
+
+            if (!TryGetRuntime(asset.ChannelId, out AudioChannelRuntime runtime))
+                return null;
+
+            if (runtime.Definition.IsMaster)
             {
-                Debug.LogError("AudioManager instance not found. Ensure an AudioManager exists in the scene.");
-                return;
+                Debug.LogWarning($"AudioAsset '{asset.name}' cannot route directly to the Master bus.", asset);
+                return null;
             }
 
-            if (!_instance.enableVoice)
+            if (!runtime.Enabled || !GetMasterRuntime().Enabled)
+                return null;
+
+            // Spatial sources are destroyed together with their parent object. Drop those entries.
+            runtime.Sources.RemoveAll(IsDestroyedSource);
+
+            AudioClipWithVolume clip = options.RandomClip
+                ? GetRandomClipFromAsset(asset)
+                : GetClipFromAsset(asset);
+            if (clip == null || clip.Clip == null)
             {
-                Debug.LogWarning("Voice Extension is not enabled.");
-                return;
+                Debug.LogWarning($"AudioAsset '{asset.name}' does not contain a playable clip.", asset);
+                return null;
             }
 
-            AudioAsset asset = _instance.audioLibrary.GetVoiceAsset(voiceClip);
-            if (asset != null)
+            AudioSource source;
+            if (options.ParentTransform != null)
             {
-                AudioClipWithVolume clipWithVolume = GetClipFromAsset(asset);
-
-                if (clipWithVolume != null && clipWithVolume.Clip != null)
-                {
-                    if (parentTransform != null)
-                    {
-                        // Spatial voice: create a new AudioSource and parent it
-                        AudioSource newSource = _instance.CreateNewSpatialSoundSource(parentTransform, asset);
-                        newSource.clip = clipWithVolume.Clip;
-                        newSource.loop = loop;
-                        newSource.volume = _instance.voiceVolume * _instance.masterVolume * clipWithVolume.Volume;
-                        newSource.Play();
-
-                        if (!loop)
-                        {
-                            // Start cleanup coroutine
-                            _instance.StartCoroutine(_instance.CleanupSpatialSoundSourceAfterPlay(newSource));
-                        }
-                    }
-                    else
-                    {
-                        // Non-spatial voice: use pooled AudioSources
-                        AudioSource availableSource = _instance._voiceSources.Find(s => !s.isPlaying);
-                        if (availableSource != null)
-                        {
-                            availableSource.clip = clipWithVolume.Clip;
-                            availableSource.loop = loop;
-                            availableSource.volume = _instance.voiceVolume * _instance.masterVolume * clipWithVolume.Volume;
-                            availableSource.Play();
-
-                            if (!loop)
-                            {
-                                // Start cleanup coroutine
-                                _instance.StartCoroutine(_instance.CleanupVoiceSourceAfterPlay(availableSource, clipWithVolume.Clip));
-                            }
-                        }
-                        else
-                        {
-                            if (_instance.maxVoicePoolSize == 0 || _instance._voiceSources.Count < _instance.maxVoicePoolSize)
-                            {
-                                AudioSource newSource = _instance.CreateNewVoiceSource(); // Dynamic source
-                                newSource.clip = clipWithVolume.Clip;
-                                newSource.loop = loop;
-                                newSource.volume = _instance.voiceVolume * _instance.masterVolume * clipWithVolume.Volume;
-                                newSource.Play();
-
-                                if (!loop)
-                                {
-                                    // Start cleanup coroutine
-                                    _instance.StartCoroutine(_instance.CleanupVoiceSourceAfterPlay(newSource, clipWithVolume.Clip));
-                                }
-                            }
-                            else
-                            {
-                                Debug.LogWarning("All Voice AudioSources are busy, and max pool size reached.");
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    Debug.LogWarning($"No clip found for '{voiceClip}'.");
-                }
+                source = CreateSpatialSource(runtime, options.ParentTransform, asset);
+            }
+            else if (runtime.Definition.PlaybackMode == AudioChannelPlaybackMode.SingleSource)
+            {
+                source = GetOrCreateSingleSource(runtime);
             }
             else
             {
-                Debug.LogWarning($"Voice asset '{voiceClip}' not found.");
+                source = AcquirePooledSource(runtime);
             }
+
+            if (source == null)
+            {
+                Debug.LogWarning($"All sources for channel '{runtime.Definition.DisplayName}' are busy.");
+                return null;
+            }
+
+            return ConfigureAndPlay(runtime, source, clip, options);
         }
 
-        /// <summary>
-        /// Plays a random voice clip by name.
-        /// </summary>
-        /// <param name="voiceClip">The name of the voice clip to play.</param>
-        /// <param name="loop">Whether the voice clip should loop.</param>
-        /// <param name="parentTransform">Optional parent transform for spatial audio.</param>
-        public static void PlayRandomVoice(VoiceClips voiceClip, bool loop = false, Transform parentTransform = null)
+        private AudioSource ConfigureAndPlay(
+            AudioChannelRuntime runtime,
+            AudioSource source,
+            AudioClipWithVolume clip,
+            PlaybackOptions options)
         {
-            if (_instance == null)
+            AudioSourceMetadata metadata = GetOrAddMetadata(source);
+            metadata.playbackVersion++;
+            metadata.channelId = runtime.Definition.Id;
+            metadata.clipVolume = clip.Volume;
+            metadata.sourceGain = options.StartMuted ? 0f : 1f;
+
+            source.clip = clip.Clip;
+            source.loop = options.Loop;
+            ApplySourceVolume(runtime, source);
+            source.Play();
+
+            if (!options.Loop && (metadata.isSpatial || !metadata.isInitial))
             {
-                Debug.LogError("AudioManager instance not found. Ensure an AudioManager exists in the scene.");
-                return;
+                StartCoroutine(ReleaseSourceAfterPlayback(runtime, source, metadata.playbackVersion));
             }
 
-            if (!_instance.enableVoice)
-            {
-                Debug.LogWarning("Voice Extension is not enabled.");
-                return;
-            }
-
-            AudioAsset asset = _instance.audioLibrary.GetVoiceAsset(voiceClip);
-            if (asset != null)
-            {
-                AudioClipWithVolume clipWithVolume = GetRandomClipFromAsset(asset);
-
-                if (clipWithVolume != null && clipWithVolume.Clip != null)
-                {
-                    if (parentTransform != null)
-                    {
-                        // Spatial voice: create a new AudioSource and parent it
-                        AudioSource newSource = _instance.CreateNewSpatialSoundSource(parentTransform, asset);
-                        newSource.clip = clipWithVolume.Clip;
-                        newSource.loop = loop;
-                        newSource.volume = _instance.voiceVolume * _instance.masterVolume * clipWithVolume.Volume;
-                        newSource.Play();
-
-                        if (!loop)
-                        {
-                            // Start cleanup coroutine
-                            _instance.StartCoroutine(_instance.CleanupSpatialSoundSourceAfterPlay(newSource));
-                        }
-                    }
-                    else
-                    {
-                        // Non-spatial voice: use pooled AudioSources
-                        AudioSource availableSource = _instance._voiceSources.Find(s => !s.isPlaying);
-                        if (availableSource != null)
-                        {
-                            availableSource.clip = clipWithVolume.Clip;
-                            availableSource.loop = loop;
-                            availableSource.volume = _instance.voiceVolume * _instance.masterVolume * clipWithVolume.Volume;
-                            availableSource.Play();
-
-                            if (!loop)
-                            {
-                                // Start cleanup coroutine
-                                _instance.StartCoroutine(_instance.CleanupVoiceSourceAfterPlay(availableSource, clipWithVolume.Clip));
-                            }
-                        }
-                        else
-                        {
-                            if (_instance.maxVoicePoolSize == 0 || _instance._voiceSources.Count < _instance.maxVoicePoolSize)
-                            {
-                                AudioSource newSource = _instance.CreateNewVoiceSource(); // Dynamic source
-                                newSource.clip = clipWithVolume.Clip;
-                                newSource.loop = loop;
-                                newSource.volume = _instance.voiceVolume * _instance.masterVolume * clipWithVolume.Volume;
-                                newSource.Play();
-
-                                if (!loop)
-                                {
-                                    // Start cleanup coroutine
-                                    _instance.StartCoroutine(_instance.CleanupVoiceSourceAfterPlay(newSource, clipWithVolume.Clip));
-                                }
-                            }
-                            else
-                            {
-                                Debug.LogWarning("All Voice AudioSources are busy, and max pool size reached.");
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    Debug.LogWarning($"No clip found for '{voiceClip}'.");
-                }
-            }
-            else
-            {
-                Debug.LogWarning($"Voice asset '{voiceClip}' not found.");
-            }
+            return source;
         }
 
-        /// <summary>
-        /// Stops all currently playing voice clips.
-        /// </summary>
-        public static void StopVoice()
+        private AudioSource GetOrCreateSingleSource(AudioChannelRuntime runtime)
         {
-            if (_instance == null)
+            foreach (AudioSource source in runtime.Sources)
             {
-                Debug.LogError("AudioManager instance not found.");
-                return;
-            }
-    
-            if (!_instance.enableVoice)
-            {
-                Debug.LogWarning("Voice Extension is not enabled.");
-                return;
+                if (source == null)
+                    continue;
+
+                AudioSourceMetadata metadata = source.GetComponent<AudioSourceMetadata>();
+                if (metadata != null && !metadata.isSpatial)
+                    return source;
             }
 
-            // Stop all playing voice audio sources
-            if (_instance._voiceSources != null)
+            if (runtime.Definition.Id == AudioChannelIds.Music && musicSource != null)
             {
-                foreach (var source in _instance._voiceSources)
-                {
-                    if (source.isPlaying)
-                    {
-                        source.Stop();
-                    }
-                }
+                RegisterSource(runtime, musicSource, true, false);
+                return musicSource;
             }
+
+            return CreateRuntimeSource(runtime, true);
         }
 
-        /// <summary>
-        /// Pauses all currently playing voice clips.
-        /// </summary>
-        public static void PauseVoice()
+        private AudioSource AcquirePooledSource(AudioChannelRuntime runtime)
         {
-            if (_instance == null)
+            foreach (AudioSource source in runtime.Sources)
             {
-                Debug.LogError("AudioManager instance not found.");
-                return;
-            }
-    
-            if (!_instance.enableVoice)
-            {
-                Debug.LogWarning("Voice Extension is not enabled.");
-                return;
+                if (source == null || source.isPlaying)
+                    continue;
+
+                AudioSourceMetadata metadata = source.GetComponent<AudioSourceMetadata>();
+                if (metadata != null && !metadata.isSpatial)
+                    return source;
             }
 
-            // Pause all playing voice audio sources
-            if (_instance._voiceSources != null)
-            {
-                foreach (var source in _instance._voiceSources)
-                {
-                    if (source.isPlaying)
-                    {
-                        source.Pause();
-                    }
-                }
-            }
+            int maxPoolSize = runtime.Definition.MaxPoolSize;
+            if (maxPoolSize != 0 && CountPoolSources(runtime) >= maxPoolSize)
+                return null;
+
+            return CreateRuntimeSource(runtime, false);
         }
 
-        /// <summary>
-        /// Resumes all paused voice clips.
-        /// </summary>
-        public static void ResumeVoice()
+        private AudioSource CreateRuntimeSource(AudioChannelRuntime runtime, bool isInitial)
         {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
-                return;
-            }
-    
-            if (!_instance.enableVoice)
-            {
-                Debug.LogWarning("Voice Extension is not enabled.");
-                return;
-            }
-
-            // Resume all paused voice audio sources
-            if (_instance._voiceSources != null)
-            {
-                foreach (var source in _instance._voiceSources)
-                {
-                    // There's no direct way to check if an AudioSource is paused,
-                    // so we can call UnPause() on all sources
-                    source.UnPause();
-                }
-            }
+            var sourceObject = new GameObject($"{runtime.Definition.DisplayName} Source");
+            sourceObject.transform.SetParent(runtime.Root.transform);
+            var source = sourceObject.AddComponent<AudioSource>();
+            RegisterSource(runtime, source, isInitial, false);
+            return source;
         }
 
-        /// <summary>
-        /// Sets the voice volume.
-        /// </summary>
-        /// <param name="volume">The new voice volume level (0.0 to 1.0).</param>
-        public static void SetVoiceVolume(float volume)
+        private AudioSource CreateSpatialSource(
+            AudioChannelRuntime runtime,
+            Transform parentTransform,
+            AudioAsset asset)
         {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
-                return;
-            }
-            
-            if (!_instance.enableVoice)
-            {
-                Debug.LogWarning("Voice Extension is not enabled.");
-                return;
-            }
+            var sourceObject = new GameObject($"{runtime.Definition.DisplayName} Spatial Source");
+            sourceObject.transform.SetParent(parentTransform);
+            sourceObject.transform.localPosition = Vector3.zero;
 
-            _instance.voiceVolume = Mathf.Clamp01(volume);
+            var source = sourceObject.AddComponent<AudioSource>();
+            RegisterSource(runtime, source, false, true);
+            source.spatialBlend = asset.useSpatialAudio ? asset.spatialBlend : 0f;
+            source.rolloffMode = asset.rolloffMode;
+            source.minDistance = asset.minDistance;
+            source.maxDistance = asset.maxDistance;
+            return source;
+        }
 
-            // Update all voice sources volumes
-            if (_instance._voiceSources != null)
+        private static void RegisterSource(
+            AudioChannelRuntime runtime,
+            AudioSource source,
+            bool isInitial,
+            bool isSpatial)
+        {
+            source.playOnAwake = false;
+            AudioSourceMetadata metadata = GetOrAddMetadata(source);
+            metadata.isInitial = isInitial;
+            metadata.isSpatial = isSpatial;
+            metadata.channelId = runtime.Definition.Id;
+            if (!runtime.Sources.Contains(source))
+                runtime.Sources.Add(source);
+        }
+
+        private static AudioSourceMetadata GetOrAddMetadata(AudioSource source)
+        {
+            AudioSourceMetadata metadata = source.GetComponent<AudioSourceMetadata>();
+            return metadata != null ? metadata : source.gameObject.AddComponent<AudioSourceMetadata>();
+        }
+
+        private IEnumerator ReleaseSourceAfterPlayback(
+            AudioChannelRuntime runtime,
+            AudioSource source,
+            int playbackVersion)
+        {
+            while (source != null && source.isPlaying)
+                yield return null;
+
+            if (source == null)
+                yield break;
+
+            AudioSourceMetadata metadata = source.GetComponent<AudioSourceMetadata>();
+            if (metadata == null || metadata.playbackVersion != playbackVersion)
+                yield break;
+
+            source.clip = null;
+            source.loop = false;
+            metadata.clipVolume = 1f;
+            metadata.sourceGain = 1f;
+
+            if (metadata.isSpatial || !metadata.isInitial)
+                DestroyRuntimeSource(runtime, source);
+        }
+
+        private void DestroyRuntimeSource(AudioChannelRuntime runtime, AudioSource source)
+        {
+            runtime.Sources.Remove(source);
+            if (source != null)
+                Destroy(source.gameObject);
+        }
+
+        private void StopChannelInternal(string channelId)
+        {
+            if (channelId == AudioChannelIds.Master)
             {
-                foreach (var source in _instance._voiceSources)
+                foreach (AudioChannelRuntime channel in _channels.Values)
                 {
-                    source.volume = _instance.voiceVolume * _instance.masterVolume;
+                    if (!channel.Definition.IsMaster)
+                        StopRuntimeSources(channel);
+                }
+
+                return;
+            }
+
+            if (TryGetRuntime(channelId, out AudioChannelRuntime runtime))
+                StopRuntimeSources(runtime);
+        }
+
+        private void StopRuntimeSources(AudioChannelRuntime runtime)
+        {
+            var sources = new List<AudioSource>(runtime.Sources);
+            foreach (AudioSource source in sources)
+            {
+                if (source == null)
+                    continue;
+
+                source.Stop();
+                AudioSourceMetadata metadata = source.GetComponent<AudioSourceMetadata>();
+                if (metadata != null && (metadata.isSpatial || !metadata.isInitial))
+                {
+                    DestroyRuntimeSource(runtime, source);
+                    continue;
+                }
+
+                source.clip = null;
+                source.loop = false;
+                if (metadata != null)
+                {
+                    metadata.clipVolume = 1f;
+                    metadata.sourceGain = 1f;
                 }
             }
         }
 
-        /// <summary>
-        /// Gets the current voice volume.
-        /// </summary>
-        /// <returns>The voice volume (0.0 to 1.0).</returns>
-        public static float GetVoiceVolume()
+        private void ForEachChannelSource(string channelId, Action<AudioSource> action)
         {
-            if (_instance == null)
+            if (channelId == AudioChannelIds.Master)
             {
-                Debug.LogError("AudioManager instance not found.");
-                return 0f;
-            }
-            
-            if (!_instance.enableVoice)
-            {
-                Debug.LogWarning("Voice Extension is not enabled.");
-                return 0f;
-            }
+                foreach (AudioChannelRuntime runtime in _channels.Values)
+                {
+                    if (!runtime.Definition.IsMaster)
+                        ForEachRuntimeSource(runtime, action);
+                }
 
-            return _instance.voiceVolume;
-        }
-        
-        /// <summary>
-        /// Fades the music volume to a target volume over a duration.
-        /// </summary>
-        /// <param name="targetVolume">The target volume (0.0 to 1.0).</param>
-        /// <param name="duration">The duration over which to fade.</param>
-        public static void FadeVoiceVolume(float targetVolume, float duration)
-        {
-            if (_instance == null)
-            {
-                Debug.LogError("AudioManager instance not found.");
-                return;
-            }
-            
-            if (!_instance.enableVoice)
-            {
-                Debug.LogWarning("Voice Extension is not enabled.");
                 return;
             }
 
-            _instance.StartCoroutine(_instance.FadeVoiceVolumeCoroutine(targetVolume, duration));
+            if (TryGetRuntime(channelId, out AudioChannelRuntime channel))
+                ForEachRuntimeSource(channel, action);
         }
-        
-        #endregion
-        
-        #region Helper Methods
-        
-        /// <summary>
-        /// Gets a clip from the AudioAsset.
-        /// </summary>
-        /// <param name="asset"></param>
-        /// <returns></returns>
+
+        private static void ForEachRuntimeSource(AudioChannelRuntime runtime, Action<AudioSource> action)
+        {
+            foreach (AudioSource source in runtime.Sources)
+            {
+                if (source != null)
+                    action(source);
+            }
+        }
+
+        private IEnumerator FadeChannelGainCoroutine(AudioChannelRuntime runtime, float targetGain, float duration)
+        {
+            float startGain = runtime.FadeGain;
+            if (duration <= 0f)
+            {
+                runtime.FadeGain = targetGain;
+                UpdateRuntimeSourceVolumes(runtime);
+                runtime.FadeCoroutine = null;
+                yield break;
+            }
+
+            float timer = 0f;
+            while (timer < duration)
+            {
+                timer += Time.deltaTime;
+                runtime.FadeGain = Mathf.Lerp(startGain, targetGain, timer / duration);
+                UpdateRuntimeSourceVolumes(runtime);
+                yield return null;
+            }
+
+            runtime.FadeGain = targetGain;
+            runtime.FadeCoroutine = null;
+            UpdateRuntimeSourceVolumes(runtime);
+        }
+
+        private void UpdateAllSourceVolumes()
+        {
+            foreach (AudioChannelRuntime runtime in _channels.Values)
+                UpdateRuntimeSourceVolumes(runtime);
+        }
+
+        private void UpdateRuntimeSourceVolumes(AudioChannelRuntime runtime)
+        {
+            if (runtime.Definition.IsMaster)
+            {
+                UpdateAllNonMasterSourceVolumes();
+                return;
+            }
+
+            foreach (AudioSource source in runtime.Sources)
+            {
+                if (source != null)
+                    ApplySourceVolume(runtime, source);
+            }
+        }
+
+        private void UpdateAllNonMasterSourceVolumes()
+        {
+            foreach (AudioChannelRuntime runtime in _channels.Values)
+            {
+                if (!runtime.Definition.IsMaster)
+                    UpdateRuntimeSourceVolumes(runtime);
+            }
+        }
+
+        private void ApplySourceVolume(AudioChannelRuntime runtime, AudioSource source)
+        {
+            AudioSourceMetadata metadata = GetOrAddMetadata(source);
+            AudioChannelRuntime master = GetMasterRuntime();
+            float masterGain = master.Enabled ? master.Volume * master.FadeGain : 0f;
+            float channelGain = runtime.Enabled ? runtime.Volume * runtime.FadeGain : 0f;
+            source.volume = masterGain * channelGain * metadata.clipVolume * metadata.sourceGain;
+        }
+
+        private void LoadVolumeSettingsInternal()
+        {
+            foreach (AudioChannelRuntime runtime in _channels.Values)
+            {
+                AudioChannelDefinition definition = runtime.Definition;
+                runtime.Volume = definition.PersistSettings
+                    ? Mathf.Clamp01(PlayerPrefs.GetFloat(
+                        GetVolumePrefsKey(definition.Id),
+                        GetLegacyVolumeDefault(definition)))
+                    : definition.DefaultVolume;
+                runtime.Enabled = definition.PersistSettings
+                    ? PlayerPrefs.GetInt(
+                        GetEnabledPrefsKey(definition.Id),
+                        definition.EnabledByDefault ? 1 : 0) != 0
+                    : definition.EnabledByDefault;
+                runtime.FadeGain = 1f;
+            }
+        }
+
+        private void SaveVolumeSettingsInternal()
+        {
+            foreach (AudioChannelRuntime runtime in _channels.Values)
+            {
+                if (!runtime.Definition.PersistSettings)
+                    continue;
+
+                PlayerPrefs.SetFloat(GetVolumePrefsKey(runtime.Definition.Id), runtime.Volume);
+                PlayerPrefs.SetInt(GetEnabledPrefsKey(runtime.Definition.Id), runtime.Enabled ? 1 : 0);
+            }
+
+            PlayerPrefs.Save();
+        }
+
+        // Volumes saved by 1.x are read once as a fallback. New values are only written to the per-channel keys.
+        private float GetLegacyVolumeDefault(AudioChannelDefinition definition)
+        {
+            string legacyKey = GetLegacyVolumePrefsKey(definition.Id);
+            return string.IsNullOrEmpty(legacyKey)
+                ? definition.DefaultVolume
+                : PlayerPrefs.GetFloat(legacyKey, definition.DefaultVolume);
+        }
+
+        private bool TryGetRuntime(string channelId, out AudioChannelRuntime runtime)
+        {
+            if (_channels.TryGetValue(channelId ?? string.Empty, out runtime))
+                return true;
+
+            Debug.LogWarning($"Audio channel '{channelId}' is not configured.", audioLibrary);
+            return false;
+        }
+
+        private AudioChannelRuntime GetMasterRuntime()
+        {
+            return _channels[AudioChannelIds.Master];
+        }
+
+        private static readonly Predicate<AudioSource> IsDestroyedSource = source => source == null;
+
+        private static int CountPoolSources(AudioChannelRuntime runtime)
+        {
+            int count = 0;
+            foreach (AudioSource source in runtime.Sources)
+            {
+                if (source == null)
+                    continue;
+
+                AudioSourceMetadata metadata = source.GetComponent<AudioSourceMetadata>();
+                if (metadata != null && !metadata.isSpatial)
+                    count++;
+            }
+
+            return count;
+        }
+
+        private static bool TryGetInstance(out AudioManager manager)
+        {
+            manager = _instance;
+            if (manager != null && manager.audioLibrary != null)
+                return true;
+
+            Debug.LogError("AudioManager instance not found or its AudioLibrary is missing.");
+            return false;
+        }
+
+        private static string GetVolumePrefsKey(string channelId)
+        {
+            return $"HarmonyAudio.Channel.{channelId}.Volume";
+        }
+
+        private static string GetEnabledPrefsKey(string channelId)
+        {
+            return $"HarmonyAudio.Channel.{channelId}.Enabled";
+        }
+
+        private static string GetLegacyVolumePrefsKey(string channelId)
+        {
+            if (channelId == AudioChannelIds.Master)
+                return "MasterVolume";
+            if (channelId == AudioChannelIds.Music)
+                return "MusicVolume";
+            if (channelId == AudioChannelIds.Sfx)
+                return "SoundsVolume";
+            if (channelId == AudioChannelIds.Voice)
+                return "VoiceVolume";
+            return null;
+        }
+
         private static AudioClipWithVolume GetClipFromAsset(AudioAsset asset)
         {
+            if (asset == null)
+                return null;
+
             if (asset.allowMultipleClips)
             {
                 if (asset.multipleClips.Count > 0)
                 {
-                    var clipWithVolume = asset.multipleClips[0];
-                    return new AudioClipWithVolume(clipWithVolume.clip, clipWithVolume.volume);
+                    ClipWithVolume clip = asset.multipleClips[0];
+                    return new AudioClipWithVolume(clip.clip, clip.volume);
                 }
             }
-            else
+            else if (asset.singleClip != null && asset.singleClip.clip != null)
             {
-                if (asset.singleClip != null && asset.singleClip.clip != null)
-                {
-                    return new AudioClipWithVolume(asset.singleClip.clip, asset.singleClip.volume);
-                }
+                return new AudioClipWithVolume(asset.singleClip.clip, asset.singleClip.volume);
             }
+
             return null;
         }
-        
-        /// <summary>
-        /// Gets a random clip from the AudioAsset, if it has multiple clips.
-        /// </summary>
-        /// <param name="asset">The AudioAsset to retrieve a random clip from.</param>
-        /// <returns>A random AudioClip, or null if the asset is empty or invalid.</returns>
 
         private static AudioClipWithVolume GetRandomClipFromAsset(AudioAsset asset)
         {
+            if (asset == null)
+                return null;
+
             if (asset.allowMultipleClips && asset.multipleClips.Count > 0)
             {
-                int randomIndex = Random.Range(0, asset.multipleClips.Count);
-                var clipWithVolume = asset.multipleClips[randomIndex];
-                return new AudioClipWithVolume(clipWithVolume.clip, clipWithVolume.volume);
+                ClipWithVolume clip = asset.multipleClips[UnityEngine.Random.Range(0, asset.multipleClips.Count)];
+                return new AudioClipWithVolume(clip.clip, clip.volume);
             }
-            else if (!asset.allowMultipleClips)
+
+            return GetClipFromAsset(asset);
+        }
+
+        private sealed class AudioChannelRuntime
+        {
+            public readonly AudioChannelDefinition Definition;
+            public readonly List<AudioSource> Sources = new List<AudioSource>();
+            public GameObject Root;
+            public float Volume;
+            public float FadeGain = 1f;
+            public bool Enabled;
+            public Coroutine FadeCoroutine;
+
+            public AudioChannelRuntime(AudioChannelDefinition definition)
             {
-                if (asset.singleClip != null && asset.singleClip.clip != null)
-                {
-                    return new AudioClipWithVolume(asset.singleClip.clip, asset.singleClip.volume);
-                }
+                Definition = definition;
+                Volume = definition.DefaultVolume;
+                Enabled = definition.EnabledByDefault;
             }
-            return null;
         }
-
-        private AudioSource CreateNewSoundSource(bool isInitial = false)
-        {
-            GameObject sourceObj = new GameObject("SoundSource");
-            sourceObj.transform.parent = _soundSourcesParent.transform;
-            AudioSource source = sourceObj.AddComponent<AudioSource>();
-            source.playOnAwake = false;
-            source.volume = soundsVolume * masterVolume;
-
-            // Attach metadata component
-            AudioSourceMetadata metadata = sourceObj.AddComponent<AudioSourceMetadata>();
-            metadata.isInitial = isInitial;
-
-            _soundSources.Add(source);
-            return source;
-        }
-
-        private AudioSource CreateNewVoiceSource(bool isInitial = false)
-        {
-            GameObject sourceObj = new GameObject("VoiceSource");
-            sourceObj.transform.parent = _voiceSourcesParent.transform;
-            AudioSource source = sourceObj.AddComponent<AudioSource>();
-            source.playOnAwake = false;
-            source.volume = voiceVolume * masterVolume;
-
-            // Attach metadata component
-            AudioSourceMetadata metadata = sourceObj.AddComponent<AudioSourceMetadata>();
-            metadata.isInitial = isInitial;
-
-            _voiceSources.Add(source);
-            return source;
-        }
-        
-        private AudioSource CreateNewSpatialSoundSource(Transform parentTransform, AudioAsset asset)
-        {
-            GameObject sourceObj = new GameObject("SpatialSoundSource");
-            sourceObj.transform.SetParent(parentTransform);
-            sourceObj.transform.localPosition = Vector3.zero; // Align with parent
-
-            AudioSource source = sourceObj.AddComponent<AudioSource>();
-            source.playOnAwake = false;
-
-            // Apply spatial settings from the AudioAsset
-            if (asset.useSpatialAudio)
-            {
-                source.spatialBlend = asset.spatialBlend;
-                source.rolloffMode = asset.rolloffMode;
-                source.minDistance = asset.minDistance;
-                source.maxDistance = asset.maxDistance;
-            }
-            else
-            {
-                source.spatialBlend = 0f; // 2D sound
-            }
-
-            return source;
-        }
-        
-        private IEnumerator CleanupSpatialSoundSourceAfterPlay(AudioSource source)
-        {
-            // Wait until the clip finishes playing
-            yield return new WaitWhile(() => source.isPlaying);
-
-            // Destroy the GameObject
-            Destroy(source.gameObject);
-        }
-
-        
-        #endregion
     }
-}
 
-namespace HarmonyAudio.Scripts
-{
     public class AudioClipWithVolume
     {
         public readonly AudioClip Clip;
@@ -1198,9 +815,8 @@ namespace HarmonyAudio.Scripts
 
         public AudioClipWithVolume(AudioClip clip, float volume)
         {
-            this.Clip = clip;
-            this.Volume = volume;
+            Clip = clip;
+            Volume = volume;
         }
     }
 }
-

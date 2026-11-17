@@ -1,9 +1,9 @@
 {
   "name": "com.micolash.harmonyaudio",
   "displayName": "Harmony Audio Manager",
-  "version": "1.0.5",
+  "version": "2.0.0",
   "unity": "2022.3",
-  "description": "A simple and quick-to-use audio manager for Unity.",
+  "description": "A data-driven audio manager for Unity. An Audio Library asset defines channels and audio assets, and the Audio Manager plays them with per-channel volume, fading, pooling, and spatial audio.",
   "keywords": [
     "audio",
     "manager",
@@ -11,6 +11,13 @@
     "music",
     "sfx"
   ],
+  "license": "MIT",
+  "documentationUrl": "https://github.com/MicoNoNico/HarmonyAudioManager#readme",
+  "changelogUrl": "https://github.com/MicoNoNico/HarmonyAudioManager/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/MicoNoNico/HarmonyAudioManager/blob/main/LICENSE.md",
+  "dependencies": {
+    "com.unity.modules.audio": "1.0.0"
+  },
   "author": {
     "name": "Niccolò Chiodo",
     "email": "micononico@gmail.com",

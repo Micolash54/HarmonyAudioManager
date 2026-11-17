@@ -2,242 +2,210 @@
   <img src="https://github.com/user-attachments/assets/52153a1d-3363-45b6-a054-58d557aec622" alt="Harmony Banner" />
 </p>
 
-# Harmony - A Simple Audio Manager
+# Harmony - A Serializable Audio Channel Manager
 
-Harmony is a simple and efficient audio manager for Unity that enables easy playback of music and sound effects, with features like volume control, fading, and saving values.
-
-### Quick Jump:
-
-- [Getting Started](#getting-started)
-- [Documentation](#documentation)
+Harmony is a data-driven audio manager for Unity. `AudioLibrary` stores channel definitions and a unified collection of `AudioAsset`s. `AudioManager` builds runtime sources from that catalog and routes each asset through its assigned channel.
 
 ## Features
 
-- **Easy Playback**: Play and control background music, sound effects, and voice clips.
+- Protected `Master`, `Music`, and `SFX` defaults for a quick first setup.
+- Custom channels such as `Ambience`, `UI`, `Combat`, or `Voice`.
+- Stable channel and asset IDs independent of editable display names and Unity filenames.
+- Single-source and pooled playback modes configured per channel.
+- Per-channel volume, mute state, fading, and optional `PlayerPrefs` persistence.
+- Random multi-clip playback and per-asset spatial audio settings.
+- Direct asset references, stable string playback IDs, and an optional unified `AudioClips` enum.
+- One-time upgrade of libraries and manager components created with Harmony 1.x.
 
-
-- **Volume Control**: Adjust master, music, sound, and voice volumes.
-
-
-- **Fading**: Fade in/out music and voice tracks smoothly.
-
-
-- **Audio Library**: Manage audio clips efficiently using `AudioAsset` and `AudioLibrary`.
-
-
-- **Enum References**: Automatic conversion of audio assets to enum references for type-safe access.
-
-
-- **Randomization**: Play random clips from a set of audio clips.
-
-
-- **Voice Extension**: Optional support for voice clips with pooling and volume control.
-
-
-- **Pooling**: Efficiently manage multiple audio sources for simultaneous playback.
-
-
-- **Settings Persistence**: Save and load volume settings using `PlayerPrefs`.
-
-
-- **Spatial Audio**: Play sounds spatially in 3D space, with per-asset spatial settings.
+Requires Unity 2022.3 or newer.
 
 ## Installation
 
-1. Download the latest `.unitypackage` file from the [Releases](https://github.com/MicoNoNico/HarmonyAudioManager/releases) section.
-2. In Unity, go to **Assets > Import Package > Custom Package...**.
-3. Select the downloaded `.unitypackage` file and click **"Open"**.
-4. Import all files.
+### Package Manager (recommended)
 
+1. In Unity, open **Window > Package Manager**.
+2. Click **+** and select **Add package from git URL...**.
+3. Enter the URL below. The `#2.0.0` suffix pins the version. Leave it out to follow the latest commit.
+
+```text
+https://github.com/MicoNoNico/HarmonyAudioManager.git#2.0.0
+```
+
+You can also add the line to `Packages/manifest.json` directly:
+
+```json
+"com.micolash.harmonyaudio": "https://github.com/MicoNoNico/HarmonyAudioManager.git#2.0.0"
+```
+
+### Unity package
+
+1. Download the latest `.unitypackage` from [Releases](https://github.com/MicoNoNico/HarmonyAudioManager/releases).
+2. In Unity, go to **Assets > Import Package > Custom Package...**.
+3. Select the package and import its files into `Assets/HarmonyAudio`.
+
+Use one installation method per project. If you are replacing a 1.x copy, read [Upgrading from 1.x](#upgrading-from-1x) first.
 
 ## Getting Started
 
-### Table of Contents
-- [1. Creating the Audio Manager](#1-creating-the-audio-manager)
-- [2. Creating the Audio Library](#2-creating-the-audio-library)
-- [3. Creating Audio Assets](#3-creating-audio-assets)
-- [4. Assigning Audio Assets to the Library](#4-assigning-audio-assets-to-the-library)
-- [5. Regenerating Library](#5-regenerating-library)
-- [6. Using the Audio Manager](#6-using-the-audio-manager)
-- [7. Implementing Spatial Audio](#7-implementing-spatial-audio)
+### 1. Create a Library
 
-### [1] Creating the Audio Manager
+1. Right-click in the Project window.
+2. Select **Create > HarmonyAudio > New Audio Library**.
+3. Name the asset `AudioLibrary`.
 
-1. **Create an Empty GameObject**:
-    - In your Unity scene, create an empty GameObject and name it `AudioManager`.
+The library creates three protected defaults:
 
+- `master`: global mix bus. Audio assets cannot route directly to it.
+- `music`: single-source playback.
+- `sfx`: pooled playback.
 
-2. **Attach the AudioManager Script**:
-    - Add the `AudioManager` script to the `AudioManager` GameObject.
+Use **Add** in the library inspector to create a custom channel. A channel receives an immutable stable ID and an editable display name. Add `Voice` the same way when your project needs a voice channel.
 
+### 2. Create the Manager
 
-3. **Add Audio Sources**:
-    - **Music Source**:
-        - Add an `AudioSource` component to the `AudioManager` GameObject.
-        - Uncheck **Play On Awake**.
-        - Set **Output** to your preferred Audio Mixer Group (optional).
-    - **Sound Sources**:
-        - The `AudioManager` will automatically create a pool of `AudioSource` components for sound effects. You can edit the pool size in the `AudioManager` script.
+1. Create an empty GameObject named `AudioManager`.
+2. Add the `AudioManager` component.
+3. Assign your `AudioLibrary`.
 
+Harmony creates the required `AudioSource` objects at runtime from the serialized channel definitions.
 
-4. **Assign the Music Source**:
-    - In the `AudioManager` component, assign the `AudioSource` you just added to the **Music Source** field.
+The manager is a singleton that persists across scene loads. Place it in your first scene.
 
+The `AudioManager` inspector includes a read-only catalog dashboard with channel summaries, assigned asset counts, and validation results.
 
-### [2] Creating the Audio Library
+### 3. Create Audio Assets
 
-1. **Create an Audio Library Asset**:
-   - Right-click in the Project window and navigate to **Create > HarmonyAudio > New Audio Library**.
-   - Name the asset `AudioLibrary`.
+1. Right-click in the Project window.
+2. Select **Create > HarmonyAudio > New Audio Asset**.
+3. Set its stable **Asset ID** and assign its **Channel**.
+4. Assign one clip or enable **Allow Multiple Clips** for randomized variants.
+5. Enable **Use Spatial Audio** when the asset needs 3D settings.
+6. Add the asset to the library's **Unified Audio Assets** list.
 
+The stable asset ID is the recommended string identifier for playback. Renaming the Unity asset file does not change routing or string-based calls.
 
-2. **Assign the Audio Library to the Audio Manager**:
-   - Select the `AudioManager` GameObject.
-   - In the `AudioManager` component, assign the `AudioLibrary` asset to the **Audio Library** field.
+## Playback API
 
-
-### [3] Creating Audio Assets
-
-1. **Create an Audio Asset**:
-   - Right-click in the Project window and navigate to **Create > HarmonyAudio > Audio Asset**.
-   - Name the asset according to its purpose (e.g., `Footsteps`, `MainTheme`, `ExplosionSound`).
-
-2. **Configure the Audio Asset**:
-   - **Single Clip**:
-      - Set **Allow Multiple Clips** to **False**.
-      - Assign an `AudioClip` to the **Single Clip** field.
-   - **Multiple Clips** (Optional):
-      - Set **Allow Multiple Clips** to **True**.
-      - Add `AudioClip`s to the **Multiple Clips** list.
-   - **Spatial Audio Settings** (Optional):
-     - **Use Spatial Audio**:
-         - Check this to enable spatial audio for this asset.
-     - **Spatial Blend**:
-         - Set between `0.0` (2D) and `1.0` (3D).
-     - **Rolloff Mode**:
-         - Choose how the sound attenuates over distance (`Logarithmic`, `Linear`, or `Custom`).
-     - **Min Distance**:
-         - The distance within which the audio source is at full volume.
-     - **Max Distance**:
-         - The distance beyond which the audio source will no longer decrease in volume.
-
-### [4] Assigning Audio Assets to the Library
-
-1. **Open the Audio Library**:
-   - Select the `AudioLibrary` asset in your Project window.
-
-2. **Add Audio Assets to the Appropriate Lists**:
-   - **Music Assets**:
-      - Click the **+** button in the **Music Assets** list.
-      - Assign your music `AudioAsset`s.
-   - **Sound Assets**:
-      - Click the **+** button in the **Sound Assets** list.
-      - Assign your sound effect `AudioAsset`s.
-   - **Voice Assets** (if Voice Extension is enabled):
-      - Click the **+** button in the **Voice Assets** list.
-      - Assign your voice `AudioAsset`s.
-
-### [5] Regenerating Library
-
-**Important: You must regenerate the enums at least once for the `AudioManager` to recognize your audio clips.**
-
-1. **Regenerate Enums**:
-   - Select your `AudioLibrary`.
-   - In the  Inspector, click the **Regenerate Library** button.
-   - This action will:
-      - Generate or update the `MusicClips` and `SoundClips` enums based on your `AudioClip` names.
-      - Create or update the enum files in `HarmonyAudio/Scripts/Library/`.
-   - Wait for Unity to recompile the scripts.
-
-### [6] Using the Audio Manager
-
-With the setup complete, you can now use the `AudioManager` to play music and sound effects in your scripts.
-
-#### Sample: Playing Music
+Play by direct asset reference:
 
 ```csharp
 using HarmonyAudio.Scripts;
-using HarmonyAudio.Scripts.Enums;
+using UnityEngine;
 
-public class PlayMusicOnStart : MonoBehaviour
+public class MenuAudio : MonoBehaviour
 {
-    private void Start()
-    {
-        // Play music using the MusicClips enum
-        AudioManager.PlayMusic(MusicClips.MainTheme);
-    }
+    [SerializeField] private AudioAsset click;
 
-    private void StopMusic()
+    public void PlayClick()
     {
-        AudioManager.StopMusic();
+        AudioManager.Play(click);
     }
 }
 ```
 
-## Documentation
+Play by stable ID, request a randomized variant, or attach spatial playback to a transform:
 
-For more detailed information on the `AudioManager` and its capabilities, refer to the sections below.
+```csharp
+AudioManager.Play("main-theme", new PlaybackOptions(loop: true));
+AudioManager.Play("footsteps", new PlaybackOptions(randomClip: true));
+AudioManager.Play("engine", new PlaybackOptions(loop: true, parentTransform: transform));
+```
 
-### AudioManager API Reference
+Control any channel through the same API:
 
-#### Music Methods
+```csharp
+AudioManager.SetChannelVolume(AudioChannelIds.Sfx, 0.8f);
+AudioManager.SetChannelEnabled("ambience", false);
+AudioManager.FadeChannelVolume(AudioChannelIds.Music, 0f, 1.5f);
+AudioManager.StopChannel("combat");
+AudioManager.SaveVolumeSettings();
+```
 
-- `PlayMusic(MusicClips musicClip, bool loop = true, Transform parentTransform = null)`
-    - Plays a music clip. Supports spatial audio if a parentTransform is provided.
-- `PlayRandomMusic(MusicClips musicClip, bool loop = true, Transform parentTransform = null)`
-    - Plays a random music clip from an `AudioAsset` that allows multiple clips. Supports spatial audio if a parentTransform is provided.
-- `StopMusic()`
-    - Stops the currently playing music.
-- `PauseMusic()`
-    - Pauses the currently playing music.
-- `ResumeMusic()`
-    - Resumes paused music.
-- `SetMusicVolume(float volume)`
-    - Sets the music volume.
-- `GetMusicVolume()`
-    - Gets the current music volume.
-- `FadeMusicVolume(float targetVolume, float duration)`
-    - Fades the music volume to a target volume over a duration.
+`Play` returns the `AudioSource` that plays the clip, or `null` when nothing was played. Keep the reference when you need to stop or adjust one specific sound, such as a looping engine.
 
-#### Sound Methods
+`FadeChannelVolume` takes a gain between `0` and `1` that is multiplied with the channel volume. A fade to `0` silences the channel and a fade to `1` restores the volume the user has set. It does not change the value returned by `GetChannelVolume`.
 
-- `PlaySound(SoundClips soundClip, Transform parentTransform = null)`
-    - Plays a sound effect. Supports spatial audio if a parentTransform is provided.
-- `PlayRandomSound(SoundClips soundClip, Transform parentTransform = null)`
-    - Plays a random sound effect from an `AudioAsset` that allows multiple clips. Supports spatial audio if a parentTransform is provided.
-- `SetSoundVolume(float volume)`
-    - Sets the sound effects volume.
-- `GetSoundVolume()`
-    - Gets the current sound effects volume.
+Passing `AudioChannelIds.Master` to `StopChannel`, `PauseChannel`, or `ResumeChannel` applies the call to every channel.
 
-#### Voice Methods (if enabled)
+## Optional Unified Enum
 
-- `PlayVoice(VoiceClips voiceClip, bool loop = false, Transform parentTransform = null)`
-    - Plays a voice clip. Supports spatial audio if a parentTransform is provided.
-- `PlayRandomVoice(VoiceClips voiceClip, bool loop = false, Transform parentTransform = null)`
-    - Plays a random voice clip from an `AudioAsset` that allows multiple clips. Supports spatial audio if a parentTransform is provided.
-- `StopVoice()`
-    - Stops all currently playing voice clips.
-- `PauseVoice()`
-    - Pauses all currently playing voice clips.
-- `ResumeVoice()`
-    - Resumes paused voice clips.
-- `SetVoiceVolume(float volume)`
-    - Sets the voice volume.
-- `GetVoiceVolume()`
-    - Gets the current voice volume.
-- `FadeVoiceVolume(float targetVolume, float duration)`
-    - Fades the voice volume to a target volume over a duration.
+Direct references and stable string IDs are the primary APIs. For a typed workflow:
 
-#### General Methods
+1. Select the `AudioLibrary`.
+2. Check **Output Folder**. The default is `Assets/HarmonyAudio/Generated`. The folder must be inside `Assets`.
+3. Click **Regenerate Unified AudioClips Enum**.
+4. Wait for Unity to recompile.
 
-- `SetMasterVolume(float volume)`
-    - Sets the master volume.
-- `GetMasterVolume()`
-    - Gets the current master volume.
-- `SaveVolumeSettings()`
-    - Saves the current volume settings.
-- `LoadVolumeSettings()`
-    - Loads the saved volume settings.
+Harmony generates one `AudioClips` enum into your project:
 
+```csharp
+using HarmonyAudio.Scripts;
+using HarmonyAudio.Scripts.Library;
 
+AudioManager.Play(AudioClips.MainTheme, new PlaybackOptions(loop: true));
+```
+
+Member names come from the asset IDs. `main-theme` becomes `MainTheme`. Regenerate the enum after you add, remove, or rename assets. Members are matched to assets by name at runtime.
+
+## Upgrading from 1.x
+
+Version 2.0 is a breaking release. Back up or commit your project first.
+
+### 1. Replace the package
+
+1. Move your own files out of `Assets/HarmonyAudio` if you stored any there, such as audio clips, `AudioAsset`s, or your `AudioLibrary`. Move them inside the Unity Editor so references are kept.
+2. Delete the old `Assets/HarmonyAudio` folder, including `Scripts/Library` with the generated `MusicClips`, `SoundClips`, and `VoiceClips` enums.
+3. Install 2.0 with one of the methods above.
+
+Script references in scenes and assets are kept because the script GUIDs did not change. Your project will show compile errors until step 3 is done.
+
+### 2. Upgrade the data
+
+1. Select your `AudioLibrary` and click **Upgrade Legacy Library** if the button is shown.
+2. Select your `AudioManager` scene component and click **Upgrade Legacy Manager Settings** if you want to copy its old volume and pool settings into the library.
+3. On the library, set the enum **Output Folder** and click **Regenerate Unified AudioClips Enum**.
+
+The upgrade maps `musicAssets` to the `music` channel, `soundAssets` to `sfx`, and `voiceAssets` to a regular `voice` channel. Each asset receives a stable ID derived from its file name.
+
+An `AudioSource` left on a 1.x `AudioManager` object is still used as the Music source. You can remove it when it does not carry mixer output or other custom settings that your project needs.
+
+### 3. Update your code
+
+| 1.x | 2.0 |
+| --- | --- |
+| `PlayMusic(MusicClips.X)` | `Play(AudioClips.X, new PlaybackOptions(loop: true))` |
+| `PlayRandomMusic(MusicClips.X)` | `Play(AudioClips.X, new PlaybackOptions(loop: true, randomClip: true))` |
+| `PlaySound(SoundClips.X)` | `Play(AudioClips.X)` |
+| `PlaySound(SoundClips.X, transform)` | `Play(AudioClips.X, new PlaybackOptions(parentTransform: transform))` |
+| `PlayRandomSound(SoundClips.X)` | `Play(AudioClips.X, new PlaybackOptions(randomClip: true))` |
+| `PlayVoice(VoiceClips.X)` | `Play(AudioClips.X)` |
+| `PlayLoopingSpatialSound(SoundClips.X, transform, startMuted)` | `Play(AudioClips.X, new PlaybackOptions(loop: true, parentTransform: transform, startMuted: startMuted))` |
+| `StopMusic()`, `StopVoice()` | `StopChannel(AudioChannelIds.Music)`, `StopChannel(AudioChannelIds.Voice)` |
+| `PauseMusic()`, `ResumeMusic()` | `PauseChannel(AudioChannelIds.Music)`, `ResumeChannel(AudioChannelIds.Music)` |
+| `SetMusicVolume(v)`, `GetMusicVolume()` | `SetChannelVolume(AudioChannelIds.Music, v)`, `GetChannelVolume(AudioChannelIds.Music)` |
+| `SetSoundVolume(v)`, `GetSoundVolume()` | `SetChannelVolume(AudioChannelIds.Sfx, v)`, `GetChannelVolume(AudioChannelIds.Sfx)` |
+| `SetVoiceVolume(v)`, `GetVoiceVolume()` | `SetChannelVolume(AudioChannelIds.Voice, v)`, `GetChannelVolume(AudioChannelIds.Voice)` |
+| `FadeMusicVolume(target, duration)` | `FadeChannelVolume(AudioChannelIds.Music, gain, duration)` |
+
+Two behaviors changed:
+
+- `PlayMusic` looped by default. `Play` does not loop unless you pass `loop: true`.
+- Fades used to change the channel volume itself. They now change a separate gain. Code that fades out and later fades back to a saved volume should fade back to `1` instead.
+
+## Channel Model
+
+Each serialized channel defines:
+
+- Stable ID and editable display name
+- Default volume and enabled state
+- Optional settings persistence
+- Playback mode: `SingleSource` or `Pooled`
+- Initial and maximum pool size for pooled channels
+
+Runtime source volume is composed as:
+
+```text
+master volume * channel volume * fade gain * clip volume * source gain
+```
+
+This keeps clip-specific balancing intact when users change channel sliders or run fades.
